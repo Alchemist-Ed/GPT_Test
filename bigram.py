@@ -14,10 +14,12 @@ from torch.nn import functional as F
 
 batch_size = 32
 block_size = 8
+### max_iters是指参数更新了多少次，不同于epochs，epochs指整个数据库被遍历了多少次
 max_iters = 3000
 eval_interval = 300
 learning_rate = 1e-2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print('gpu enabled') if torch.cuda.is_available() else print('training on cpu')
 eval_iters = 200
 #################
 
@@ -97,6 +99,7 @@ xb, yb = get_batch('train')
 @torch.no_grad()
 def estimate_loss():
     out = {}
+    ## 开启模型的评估模式: 此模式下，dropout层会停止dropout，所有神经元参与运算，BN层使用运行统计量而非当前batch统计量
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
@@ -105,6 +108,8 @@ def estimate_loss():
             logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
+    
+    ## 评估完成后要切换回训练模式, eval(), train()都是nn.Module类自带函数，且往往成对使用
     model.train()
     return out
 
@@ -176,7 +181,6 @@ for iter in range(max_iters):
     loss.backward()
     ## 根据优化器所使用的算法来更新模型参数
     optimizer.step()
-    print(loss.item())
     
 ### 生成预测文本时，也需要再device上生成
 context = torch.zeros((1,1), dtype=torch.long, device=device)
