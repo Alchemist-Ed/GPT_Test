@@ -11,11 +11,14 @@ from torch.nn import functional as F
                                                             ####### 参数声明 ####################
                                                             ####################################
 
-
-batch_size = 32
+                                                   
 block_size = 8
-### max_iters是指参数更新了多少次，不同于epochs，epochs指整个数据库被遍历了多少次
+#### Block size/context size， 一条输入文本中最多包含多少token
+batch_size = 32
+#### Batch size，有多少条独立的文本同时被并行训练
+
 max_iters = 3000
+### max_iters是指参数更新了多少次，不同于epochs，epochs指整个数据库被遍历了多少次
 eval_interval = 300
 learning_rate = 1e-2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -76,9 +79,8 @@ train_data = data[:n]
 val_data = data[n:]
 
 
-#### Block size/context size， 一条输入文本中最多包含多少token
-#### Batch size，有多少条独立的文本同时被并行训练
 
+#### Data Loader
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -87,8 +89,6 @@ def get_batch(split):
     ### 使用cuda时，确保数据被转移到cuda的设备上
     x, y = x.to(device), y.to(device)
     return x, y
-
-xb, yb = get_batch('train')
 
 
 ##############################
@@ -150,7 +150,7 @@ m = model.to(device)
 ## 创建模型时，模型也需要转移到device上
 
 ## 这里存在nn.Module类的隐式调用，调用的是forward函数
-logits, loss = m(xb, yb)
+# logits, loss = m(xb, yb)
 ## 手动设置第一个输入的向量，设置为([0,0])的张量，代表unicode中的start符号
 
 ## 现阶段的模型并没有被训练，生成结果全部是随机数
@@ -185,3 +185,11 @@ for iter in range(max_iters):
 ### 生成预测文本时，也需要再device上生成
 context = torch.zeros((1,1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=100)[0].tolist()))
+
+
+
+                                            ############################################################
+                                            ################ 注意力结构 #################################
+                                            ############################################################
+
+
