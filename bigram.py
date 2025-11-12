@@ -12,19 +12,22 @@ from torch.nn import functional as F
                                                             ####################################
 
                                                    
-block_size = 8
+block_size = 256
 #### Block size/context size， 一条输入文本中最多包含多少token
-batch_size = 32
+batch_size = 64
 #### Batch size，有多少条独立的文本同时被并行训练
 
-max_iters = 3000
+max_iters = 5000
 ### max_iters是指参数更新了多少次，不同于epochs，epochs指整个数据库被遍历了多少次
-eval_interval = 300
-learning_rate = 1e-2
+eval_interval = 500
+learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('gpu enabled') if torch.cuda.is_available() else print('training on cpu')
 eval_iters = 200
-n_embd = 32
+n_embd = 384
+n_head = 6
+n_layer = 6
+dropout = 0.2
 #################
 
 
@@ -114,10 +117,90 @@ def estimate_loss():
     model.train()
     return out
 
+#############################################
+############## 单头注意力 ####################
+#############################################
 
-##########################
-#### 生成模型 #############
-##########################
+
+class Head(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        ### register buff 函数可以做到一次创建，之后只需要调用，性能优化，同时会自动同步device
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x)
+        q = self.query(x)
+        v = self.value(x)
+
+        wei = q @ k.transpose(-2, -1) * C**-0.5
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
+        out = wei @ v
+        return out
+    
+
+#############################################
+############## 多头注意力 ####################
+#############################################
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
+
+
+#############################################
+############## 前馈网络 ######################
+#############################################
+class FeedForward(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+######################################################
+############## 创建Decoder Block  #####################
+######################################################
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+    
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
+
+
+
+##################################
+############ 生成模型 #############
+##################################
 
 ### 这里客制化一个最基础的语言模型，继承于nn.Module类
 class BigramLanguageModel(nn.Module):
@@ -125,9 +208,12 @@ class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)        
-        self.lm_head = nn.Linear(n_embd, vocab_size)
         ## position层
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
+        self.lm_head = nn.Linear(n_embd, vocab_size)
+
 
     ## 改写forward函数，向前传播方法改为查询输入值在嵌入层中的对应向量
     def forward(self, idx, targets=None):
@@ -136,6 +222,8 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))
         tok_emb = self.token_embedding_table(idx) ## B,T,n_embd
         x = tok_emb + pos_emb
+        x = self.blocks(x)
+        x = self.ln_f(x)
         logits = self.lm_head(x) ## B,T,vocab_size
 
         if targets is None:
@@ -149,7 +237,10 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
-            logits, loss = self(idx)
+            ## 修剪idx，输入矩阵的形状，使得它不超过block size
+            idx_cond = idx[:, -block_size:]
+
+            logits, loss = self(idx_cond)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
